@@ -77,7 +77,7 @@ sea_creatures/
     - Ensure `_PIP_ADDITIONAL_REQUIREMENTS` includes all necessary packages
     ```dotenv
     # .env Example
-    # AIRFLOW_UID=... # Set on Linux if needed
+    # AIRFLOW_UID=...
 
     _PIP_ADDITIONAL_REQUIREMENTS=psycopg2-binary sqlalchemy requests polars connectorx apache-airflow-providers-postgres pyarrow pandas # Add all needed
 
