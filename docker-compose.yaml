@@ -72,6 +72,7 @@ x-airflow-common:
     # The following line can be used to set a custom config file, stored in the local config folder
     # If you want to use it, outcomment it and replace airflow.cfg with the name of your config file
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    APP_POSTGRES_CONN: postgresql+psycopg2://${_POSTGRES_USER:-airflow}:${_POSTGRES_PASSWORD:-airflow}@postgres/${_POSTGRES_DB:-airflow}
 
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
