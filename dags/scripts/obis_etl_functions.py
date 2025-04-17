@@ -4,6 +4,7 @@ import logging
 import time
 import datetime
 import polars as pl
+from sqlalchemy import create_engine
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -215,6 +216,7 @@ def _enrich_data(df: pl.DataFrame) -> pl.DataFrame:
 try:
     from .obis_sql_schema import ALL_TABLE_CREATE_STATEMENTS 
     from .obis_normalization import extract_species_dimension, extract_datasets_dimension, extract_record_details_dimension, create_occurrence_facts
+    from .obis_db_operations import create_table
     
     IMPORTS_OK = True
 except ImportError as e:
@@ -251,3 +253,17 @@ def transform_and_split_data(raw_data_path: str) -> dict[str, pl.DataFrame] | No
     except Exception as e:
         logging.error(f"Error during transform/split: {e}", exc_info=True)
         return None
+    
+def prepare_postgres_schema(conn_str: str):
+    """ Ensures all tables defined in obis_schema.py exist. """
+    if not IMPORTS_OK: raise ImportError("ETL/DB Ops/Schema functions failed to load.")
+    logging.info(f"Ensuring PostgreSQL schema exists using definitions from obis_schema.py...")
+    try:
+        engine = create_engine(conn_str) 
+        for i, create_sql in enumerate(ALL_TABLE_CREATE_STATEMENTS):
+            table_name_guess = f"table_{i+1}" 
+            create_table(engine, create_sql, table_name_guess)
+        logging.info(f"All {len(ALL_TABLE_CREATE_STATEMENTS)} table schemas ensured to exist.")
+        return True
+    except Exception as e:
+        raise RuntimeError("Failed to ensure PostgreSQL schema exists.") from e
