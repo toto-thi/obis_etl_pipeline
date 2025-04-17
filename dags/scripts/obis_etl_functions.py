@@ -5,6 +5,7 @@ import time
 import datetime
 import polars as pl
 from sqlalchemy import create_engine
+from airflow.providers.postgres.hooks.postgres import PostgresHook 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -216,7 +217,7 @@ def _enrich_data(df: pl.DataFrame) -> pl.DataFrame:
 try:
     from .obis_sql_schema import ALL_TABLE_CREATE_STATEMENTS 
     from .obis_normalization import extract_species_dimension, extract_datasets_dimension, extract_record_details_dimension, create_occurrence_facts
-    from .obis_db_operations import create_table
+    from .obis_db_operations import create_table, load_table_from_parquet
     
     IMPORTS_OK = True
 except ImportError as e:
@@ -267,3 +268,90 @@ def prepare_postgres_schema(conn_str: str):
         return True
     except Exception as e:
         raise RuntimeError("Failed to ensure PostgreSQL schema exists.") from e
+    
+def load_postgres_normalized_data(conn_id: str, data_path_prefix: str):
+        
+    logging.info("--- Starting Normalized Data Load (Pre-filter Append Dims, Replace Facts) ---")
+    
+    # Define dimensions and their primary keys
+    dimensions_map = {
+        "species": {"target_table": "dim_species", "pk": "aphia_id"},
+        "datasets": {"target_table": "dim_datasets", "pk": "dataset_id"},
+        "records": {"target_table": "dim_record_details", "pk": "obis_id"},
+    }
+    fact_file_prefix = "occurrences"
+    fact_table_name = "fact_occurrences"
+    fact_load_strategy = "replace"
+
+    # --- Load Dimensions (Check Existing Keys, Filter, then Append) ---
+    logging.info("Loading/Updating Dimension Tables (Insert New PKs Only)...")
+    all_dims_succeeded = True
+    pg_hook = PostgresHook(postgres_conn_id=conn_id)
+    conn_str = pg_hook.get_uri()
+
+    for file_prefix, config in dimensions_map.items():
+        parquet_file = os.path.join(data_path_prefix, f"{file_prefix}.parquet")
+        target_table = config["target_table"]
+        pk_col = config["pk"]
+        
+        logging.info(f"--- Processing Dimension: {target_table} ---")
+        
+        if not os.path.exists(parquet_file):
+            logging.warning(f"Parquet file not found: {parquet_file}. Skipping dimension {target_table}.")
+            continue 
+
+        try:
+            df_new_dim = pl.read_parquet(parquet_file)
+            
+            if df_new_dim.height > 0:
+                if pk_col not in df_new_dim.columns:
+                     logging.error(f"PK column '{pk_col}' not found in {parquet_file}. Skipping {target_table}.")
+                     all_dims_succeeded = False; continue
+                
+                df_new_dim = df_new_dim.drop_nulls(subset=[pk_col])
+                if df_new_dim.height == 0:
+                     logging.info(f"No valid non-null PKs found in {parquet_file} for {target_table}. Skipping.")
+                     continue
+
+                # Get existing primary keys from target table
+                logging.info(f"Fetching existing keys from public.{target_table}...")
+                sql_get_keys = f'SELECT DISTINCT "{pk_col}" FROM public."{target_table}";'
+                existing_keys_df = pg_hook.get_pandas_df(sql=sql_get_keys) # Fetch keys
+                existing_keys_set = set(existing_keys_df[pk_col])
+                logging.info(f"Found {len(existing_keys_set)} existing keys.")
+
+                # Filter new data to exclude existing keys
+                df_to_insert = df_new_dim.filter(~pl.col(pk_col).is_in(existing_keys_set))
+                num_to_insert = df_to_insert.height
+                
+                if num_to_insert > 0:
+                    # Append only the *new* rows using write_database
+                    logging.info(f"Found {num_to_insert} new records for {target_table}. Appending...")
+                    df_to_insert.write_database(
+                        table_name=target_table,
+                        connection=conn_str,
+                        if_table_exists="append", # Append to the existing table
+                    )
+                    logging.info(f"Append complete for {target_table}.")
+                else:
+                    logging.info(f"No new records to insert into {target_table}.")
+            else:
+                 logging.info(f"Parquet file {parquet_file} for dimension {target_table} is empty. Skipping.")
+
+        except Exception as e:
+            logging.error(f"Failed processing dimension {target_table}: {e}")
+            all_dims_succeeded = False
+            raise
+
+    # --- Load Fact Table ---
+    if all_dims_succeeded:
+         logging.info(f"Loading Fact Table ({fact_table_name}, strategy: {fact_load_strategy})...")
+         fact_parquet_file = os.path.join(data_path_prefix, f"{fact_file_prefix}.parquet")
+         success = load_table_from_parquet(fact_parquet_file, fact_table_name, conn_str, if_table_exists_strategy=fact_load_strategy) 
+         if not success:
+              pass
+    else:
+         logging.error("Skipping fact table load due to dimension processing issues.")
+         raise RuntimeError("Dimension table processing failed or was skipped.")
+
+    logging.info("--- Normalized Data Load Finished ---")
