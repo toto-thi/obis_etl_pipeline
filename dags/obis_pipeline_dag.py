@@ -14,6 +14,7 @@ from airflow.models import Variable
 from airflow.exceptions import AirflowFailException
 from airflow.datasets import Dataset
 from airflow.providers.common.sql.operators.sql import SQLCheckOperator
+from airflow.utils.email import send_email
 
 try:
     from scripts.obis_etl_functions import (
@@ -172,7 +173,55 @@ def _check_postgres_load():
         
     if not check_passed:
          raise AirflowFailException("Data quality check failed for PostgreSQL.")
-     
+
+# Let's drafted a failure email message 
+# We will send to email that we want, you can modified RECEPIENT
+RECEPIENT = "your_email@gmail.com"
+SMTP_CONN_ID = "smtp_conn"
+
+# Custom callback to send email on task failure using SMTP.
+def failure_email(context):
+    try:
+        task_instance = context['task_instance']
+        dag_id = task_instance.dag_id
+        task_id = task_instance.task_id
+        execution_date = context['execution_date']
+        log_url = task_instance.log_url
+        
+        task_status = 'Failed'
+        subject = f"Airflow Alert: Task Failed - DAG: {dag_id}, Task: {task_id}"
+        
+        body = f"""
+        <h3>Airflow Task Failure Alert</h3>
+        <b>DAG:</b> {dag_id}<br>
+        <b>Task:</b> {task_id}<br>
+        <b>Status:</b> {task_status}<br>
+        <b>Execution Date:</b> {execution_date}<br>
+        <b>Log URL:</b> <a href="{log_url}" target="_blank">View Logs</a><br>
+        <br>
+        Task instance failed. Please check the logs for details.
+        """
+        
+        to_email = [email.strip() for email in RECEPIENT.split(',') if email.strip()] 
+        
+        if not to_email:
+             logging.warning("No recipient email configured for failure alert.")
+             return
+
+        logging.info(f"Sending failure email to {to_email} via connection '{SMTP_CONN_ID}'...")
+        
+        send_email(
+            to=to_email, 
+            subject=subject, 
+            html_content=body,
+            conn_id=SMTP_CONN_ID
+        )
+        
+        logging.info(f"Failure email sent successfully via connection '{SMTP_CONN_ID}'.")
+
+    except Exception as e:
+        logging.error(f"Failed to send failure email via connection '{SMTP_CONN_ID}': {e}", exc_info=True)
+        
 # --- DAG Definition ---
 with DAG(
     dag_id="obis_deep_sea_normalized_etl", 
@@ -183,7 +232,9 @@ with DAG(
     default_args={
         "owner": "airflow", # Change as you needed
         "retries": 1,
-        "retry_delay": datetime.timedelta(minutes=3)
+        "retry_delay": datetime.timedelta(minutes=3),
+        'email_on_failure': True,
+        'email_on_retry': False,
     },
     description="ETL pipeline for OBIS data with normalized PostgreSQL schema.",
 ) as dag:
@@ -192,21 +243,25 @@ with DAG(
     extract_task = PythonOperator(
         task_id="extract_obis_data",
         python_callable=_extract_data,
+        on_failure_callback = failure_email,
     )
 
     transform_task = PythonOperator(
         task_id="transform_and_split_data", 
         python_callable=_transform_and_split,
+        on_failure_callback = failure_email,
     )
 
     prepare_pg_schema_task = PythonOperator( 
         task_id="prepare_postgres_schema",
         python_callable=_prepare_postgres_schema,
+        on_failure_callback = failure_email,
     )
     
     load_pg_normalized_task = PythonOperator( 
         task_id="load_to_postgres_normalized",
         python_callable=_load_postgres_normalized,
+        on_failure_callback = failure_email,
         outlets=[
             ds_fact_occurrences, 
             ds_dim_species, 
@@ -218,6 +273,7 @@ with DAG(
     check_pg_task = PythonOperator(
     task_id="check_postgres_row_counts",
     python_callable=_check_postgres_load, 
+    on_failure_callback = failure_email,
     )
     
     # Ensure essential Foreign Keys in fact table are not NULL
@@ -228,7 +284,8 @@ with DAG(
         SELECT COUNT(*)
         FROM fact_occurrences
         WHERE obis_id IS NULL OR aphia_id IS NULL OR dataset_id IS NULL;
-        """
+        """,
+        on_failure_callback = failure_email,
     )
     
     # Ensure all depths are within the expected range (>= 1000)
@@ -239,7 +296,8 @@ with DAG(
         SELECT COUNT(*) = 0
         FROM fact_occurrences 
         WHERE depth_m < 500;
-        """
+        """,
+        on_failure_callback = failure_email,
     )
 
     # --- Define Flow ---

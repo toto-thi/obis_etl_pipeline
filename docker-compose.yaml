@@ -74,6 +74,15 @@ x-airflow-common:
     # AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     APP_POSTGRES_CONN: postgresql+psycopg2://${_POSTGRES_USER:-airflow}:${_POSTGRES_PASSWORD:-airflow}@postgres/${_POSTGRES_DB:-airflow}
 
+    # Configure for sending email using SMTP
+    AIRFLOW__EMAIL__EMAIL_BACKEND:  ${AIRFLOW__EMAIL__EMAIL_BACKEND}
+    AIRFLOW__SMTP__SMTP_HOST: ${AIRFLOW__SMTP__SMTP_HOST}
+    AIRFLOW__SMTP__SMTP_PORT: 587 
+    AIRFLOW__SMTP__SMTP_USER: ${AIRFLOW__SMTP__SMTP_USER}
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${AIRFLOW__SMTP__SMTP_PASSWORD}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW__SMTP__SMTP_MAIL_FROM}
+    AIRFLOW__SMTP__SMTP_STARTTLS: True
+    AIRFLOW__SMTP__SMTP_SSL: False
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
