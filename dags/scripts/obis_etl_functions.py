@@ -212,3 +212,42 @@ def _enrich_data(df: pl.DataFrame) -> pl.DataFrame:
          
     return df_enriched
 
+try:
+    from .obis_sql_schema import ALL_TABLE_CREATE_STATEMENTS 
+    from .obis_normalization import extract_species_dimension, extract_datasets_dimension, extract_record_details_dimension, create_occurrence_facts
+    
+    IMPORTS_OK = True
+except ImportError as e:
+    logging.error(f"Failed to import dependent modules (schema/normalization/db_ops): {e}")
+    IMPORTS_OK = False
+    
+def transform_and_split_data(raw_data_path: str) -> dict[str, pl.DataFrame] | None:
+    """ Orchestrates OBIS data transformation AND normalization into dimension/fact tables. """
+    if not IMPORTS_OK: raise ImportError("ETL/Normalization/Schema functions failed to load.")
+    logging.info(f"--- Starting Full Transformation & Normalization for {raw_data_path} ---")
+    try:
+        # Initial Load & Clean using existing helpers
+        df_dedup = _load_and_deduplicate_raw_data(raw_data_path)
+        if df_dedup is None or df_dedup.height == 0: return None 
+        df_selected = _select_and_rename(df_dedup)
+        df_validated = _clean_cast_validate_impute(df_selected)
+        df_enriched = _enrich_data(df_validated)
+        if df_enriched is None or df_enriched.height == 0: return None
+        logging.info(f"Base cleaning finished. Shape before normalization: {df_enriched.shape}")
+
+        # Extract Dimensions & Facts using imported normalization functions
+        df_species = extract_species_dimension(df_enriched)
+        df_datasets = extract_datasets_dimension(df_enriched)
+        df_records = extract_record_details_dimension(df_enriched)
+        df_facts= create_occurrence_facts(df_enriched)
+
+        logging.info(f"--- Transformation & Normalization Finished ---")
+        return {
+            'species': df_species, 
+            'datasets': df_datasets,
+            'record_details': df_records,
+            'occurrences': df_facts 
+        }
+    except Exception as e:
+        logging.error(f"Error during transform/split: {e}", exc_info=True)
+        return None
