@@ -56,6 +56,11 @@ POSTGRES_CONN_ID = "obis_postgres"
 pg_db_name = "airflow"
 pg_schema = "public"
 
+ds_fact_occurrences = Dataset(f"postgresql://{POSTGRES_CONN_ID}/{pg_db_name}/{pg_schema}/fact_occurrences")
+ds_dim_species = Dataset(f"postgresql://{POSTGRES_CONN_ID}/{pg_db_name}/{pg_schema}/dim_species")
+ds_dim_datasets = Dataset(f"postgresql://{POSTGRES_CONN_ID}/{pg_db_name}/{pg_schema}/dim_datasets")
+ds_dim_record_details = Dataset(f"postgresql://{POSTGRES_CONN_ID}/{pg_db_name}/{pg_schema}/dim_record_details")
+
 def _extract_data():
     """Fetches data and saves to JSON file in the shared store."""
     if not FUNCTIONS_LOADED: raise ImportError("ETL functions failed to load.")
@@ -82,7 +87,6 @@ def _transform_and_split():
     if not os.path.exists(RAW_DATA_PATH):
          raise FileNotFoundError(f"Raw data file not found for transformation: {RAW_DATA_PATH}")
          
-    # Call the function that returns the dictionary of DataFrames
     dataframes_dict = transform_and_split_data(RAW_DATA_PATH) 
     
     if dataframes_dict is None:
@@ -95,7 +99,7 @@ def _transform_and_split():
 
     saved_files = 0
     for name, df in dataframes_dict.items():
-        output_path = TRANSFORMED_FILES.get(name) # Get path from our dict
+        output_path = TRANSFORMED_FILES.get(name)
         if output_path is None:
             logging.warning(f"No output path defined for transformed DataFrame '{name}', skipping save.")
             continue
@@ -168,3 +172,76 @@ def _check_postgres_load():
         
     if not check_passed:
          raise AirflowFailException("Data quality check failed for PostgreSQL.")
+     
+# --- DAG Definition ---
+with DAG(
+    dag_id="obis_deep_sea_normalized_etl", 
+    start_date=pendulum.datetime(2024, 1, 1, tz="UTC"), 
+    schedule=None, # Manual trigger, for aumation check README.md
+    catchup=False,
+    tags=["etl", "obis", "deep-sea", "normalized", "portfolio"],
+    default_args={
+        "owner": "airflow", # Change as you needed
+        "retries": 1,
+        "retry_delay": datetime.timedelta(minutes=3)
+    },
+    description="ETL pipeline for OBIS data with normalized PostgreSQL schema.",
+) as dag:
+
+    # --- Define Tasks ---
+    extract_task = PythonOperator(
+        task_id="extract_obis_data",
+        python_callable=_extract_data,
+    )
+
+    transform_task = PythonOperator(
+        task_id="transform_and_split_data", 
+        python_callable=_transform_and_split,
+    )
+
+    prepare_pg_schema_task = PythonOperator( 
+        task_id="prepare_postgres_schema",
+        python_callable=_prepare_postgres_schema,
+    )
+    
+    load_pg_normalized_task = PythonOperator( 
+        task_id="load_to_postgres_normalized",
+        python_callable=_load_postgres_normalized,
+        outlets=[
+            ds_fact_occurrences, 
+            ds_dim_species, 
+            ds_dim_datasets, 
+            ds_dim_record_details
+        ] 
+    )
+    
+    check_pg_task = PythonOperator(
+    task_id="check_postgres_row_counts",
+    python_callable=_check_postgres_load, 
+    )
+    
+    # Ensure essential Foreign Keys in fact table are not NULL
+    check_fk_nulls = SQLCheckOperator(
+        task_id="check_foreign_key_nulls",
+        conn_id=POSTGRES_CONN_ID, 
+        sql="""
+        SELECT COUNT(*)
+        FROM fact_occurrences
+        WHERE obis_id IS NULL OR aphia_id IS NULL OR dataset_id IS NULL;
+        """
+    )
+    
+    # Ensure all depths are within the expected range (>= 1000)
+    check_depth_range = SQLCheckOperator(
+        task_id="check_depth_range",
+        conn_id=POSTGRES_CONN_ID,
+        sql="""
+        SELECT COUNT(*) = 0
+        FROM fact_occurrences 
+        WHERE depth_m < 500;
+        """
+    )
+
+    # --- Define Flow ---
+    extract_task >> transform_task >> prepare_pg_schema_task >> load_pg_normalized_task
+    load_pg_normalized_task >> [check_fk_nulls, check_depth_range, check_pg_task]
