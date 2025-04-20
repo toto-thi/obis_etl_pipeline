@@ -67,7 +67,7 @@ sea_creatures/
 
 2. Clone Repository
     ```bash
-    git clone <your-repository-url>
+    git clone (https://github.com/toto-thi/obis_etl_pipeline)
     cd sea_creatures
     ```
 
