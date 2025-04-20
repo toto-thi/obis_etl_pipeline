@@ -68,7 +68,6 @@ sea_creatures/
 2. Clone Repository
     ```bash
     git clone https://github.com/toto-thi/obis_etl_pipeline
-    cd sea_creatures
     ```
 
 3. Configure Environment (`.env` file)
